@@ -4,8 +4,9 @@ save chi<3 per-cell pairs (for triangles) and all unique pairs with GLOBAL track
 import numpy as np, pickle, glob
 import search6b as S6, time, sys, os
 from search import load_tracklets
-import kernel4 as K4, search6b as S3
-PASS_TRK = int(os.environ.get('ISO_PASS_TRK', '16000'))   # tracklets per pass unit; sols/pass ~ N/PASS_TRK
+import kernel4 as K4, search6b as S3, search3 as SK
+PASS_TRK = int(os.environ.get('ISO_PASS_TRK', '16000'))
+KCACHE = os.environ.get('ISO_KCACHE', '1') == '1'; KSPLIT = int(os.environ.get('ISO_KSPLIT', '2'))   # per-band kernel cache (search3.run_kernel_cached)   # tracklets per pass unit; sols/pass ~ N/PASS_TRK
 
 def dedupe_lean(P, per_cell=False):
     """Same result as search3.dedupe (keep lowest-chi row per unordered tracklet pair) without the float64 copy.
@@ -69,7 +70,9 @@ for wi, ws in enumerate(starts):
             print(f'  w{wi:02d} pass {p}/{npass}: loaded {len(P)} pairs from checkpoint', flush=True); continue
         keep_cells = np.zeros(g['ncell'], bool); keep_cells[kfrom:kto] = True
         nbk = nb_ids[kfrom:kto].ravel(); keep_cells[nbk[nbk >= 0]] = True   # hasher reads a cell's sols and its neighbour cells' sols only
-        cell, tid, val = S3.run_kernel(sub, g, cb, max(B0 - 1, 0), min(B1 + 1, g['nb']), keep_cells=keep_cells); nsol += len(cell); tk += time.time() - t0
+        if KCACHE: cell, tid, val = SK.run_kernel_cached(sub, g, cb, max(B0 - 1, 0), min(B1 + 1, g['nb']), keep_cells, f'{OUT}/kcache', f'w{wi:02d}', nsplit=KSPLIT)   # kernel once per band, cached on disk
+        else: cell, tid, val = S3.run_kernel(sub, g, cb, max(B0 - 1, 0), min(B1 + 1, g['nb']), keep_cells=keep_cells)
+        nsol += len(cell); tk += time.time() - t0
         P, ov, ro = S3.find_pairs(cell, tid, val, sub['t'], g, nb_ids, nb_off, kfrom, kto, tp0=tp0)
         P[:, 0] = sel[P[:, 0].astype(int)]; P[:, 1] = sel[P[:, 1].astype(int)]
         P = dedupe_lean(P.astype(np.float32), per_cell=True); np.save(pf, P); over += ov; nraw += len(P)

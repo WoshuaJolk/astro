@@ -113,9 +113,11 @@ def hash_cell(k, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, 
         K = Kb; W = Wb
     else:
         K = np.empty(m * NSUB * NSUB, np.int32); W = np.empty(m * NSUB * NSUB, np.int32)
-    tot = 0
-    for p in range(m):
-        for jx in range(NSUB):
+    st = np.zeros(6, np.int64)   # n, -, nover, -, -, nemitcalls
+    nrt = 0; nrunlong = 0; x0 = -ext; x1 = ext
+    for jx in range(NSUB):   # one sub-cell column at a time: keys with different jx never share a run or a neighbour key, so this is exact and cuts the K/W buffers NSUB-fold
+        tot = 0
+        for p in range(m):
             dx = (jx + 0.5) / NSUB * 2 * cr - cr
             ddx = dx + off[p, 0]
             if abs(ddx) > ext: continue
@@ -129,102 +131,98 @@ def hash_cell(k, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, 
                 bv = int(math.floor(v / tv)); bb = int(math.floor(tpv / tt)) + NT // 2
                 if bv < 0 or bv >= NV or bb < 0 or bb >= NT: continue
                 K[tot] = (j * NV + bv) * NT + bb; W[tot] = p; tot += 1
-    if tot < 2: return 0, 0, 0, 0, 0
-    if K2b.shape[0] > tot:
-        K2 = K2b; W2 = W2b
-    else:
-        K2 = np.empty(tot + 1, np.int32); W2 = np.empty(tot + 1, np.int32)
-    radix_sort(K, W, tot, K2, W2, rcnt)
-    nrun = 0
-    for i in range(tot):
-        if i == 0 or K[i] != K[i - 1]: K2[nrun] = i; nrun += 1
-    K2[nrun] = tot
-    rkey = np.empty(nrun, np.int64)
-    for r in range(nrun): rkey[r] = np.int64(K[K2[r]])
-    smask = skey.shape[0] - 1; rmask = runset.shape[0] - 1
-    st = np.zeros(6, np.int64)   # n, -, nover, -, -, nemitcalls
-    nrt = 0
-    x0 = -ext; x1 = ext
-    Lmax = 0
-    for r in range(nrun):
-        L = K2[r + 1] - K2[r]
-        if L > Lmax: Lmax = L
-    bxA = np.empty(Lmax); byA = np.empty(Lmax); bzA = np.empty(Lmax); vA = np.empty(Lmax); tA = np.empty(Lmax); oA = np.empty(Lmax, np.int64)
-    bxB = np.empty(Lmax); byB = np.empty(Lmax); bzB = np.empty(Lmax); vB = np.empty(Lmax); tB = np.empty(Lmax); oB = np.empty(Lmax, np.int64)
-    nrunlong = 0
-    for r in range(sh, nrun, nsh):   # shard: run r is the lower-key side; neighbours are looked up in the full run list, so shards partition the pair set
-        a = K2[r]; b = K2[r + 1]; L = b - a
-        key = rkey[r]
-        j = key // (NV * NT); bv = (key // NT) % NV; bb = key % NT
-        jx = j // NSUB; jy = j % NSUB
-        dx = (jx + 0.5) / NSUB * 2 * cr - cr; dy = (jy + 0.5) / NSUB * 2 * cr - cr
-        haveA = False
-        if L >= 2:
-            if L > 256: nrunlong += 1
-            hs = np.int64(L)
-            for ii in range(L):
-                q = np.int64(W[a + ii]); hs += (q + 1) * np.int64(0x9E3779B97F4A7C15)
-            hh = (hs ^ (hs >> 29)) & rmask
-            skip = False
-            while runset[hh] != 0:
-                if runset[hh] == hs: skip = True; break
-                hh = (hh + 1) & rmask
-            if not skip:
-                fill_l(a, L, W, off, V, dx, dy, bxA, byA, bzA, vA, tA, oA, tp0); haveA = True
+        if tot < 2: continue
+        if K2b.shape[0] > tot:
+            K2 = K2b; W2 = W2b
+        else:
+            K2 = np.empty(tot + 1, np.int32); W2 = np.empty(tot + 1, np.int32)
+        radix_sort(K, W, tot, K2, W2, rcnt)
+        nrun = 0
+        for i in range(tot):
+            if i == 0 or K[i] != K[i - 1]: K2[nrun] = i; nrun += 1
+        K2[nrun] = tot
+        rkey = np.empty(nrun, np.int64)
+        for r in range(nrun): rkey[r] = np.int64(K[K2[r]])
+        smask = skey.shape[0] - 1; rmask = runset.shape[0] - 1
+        Lmax = 0
+        for r in range(nrun):
+            L = K2[r + 1] - K2[r]
+            if L > Lmax: Lmax = L
+        bxA = np.empty(Lmax); byA = np.empty(Lmax); bzA = np.empty(Lmax); vA = np.empty(Lmax); tA = np.empty(Lmax); oA = np.empty(Lmax, np.int64)
+        bxB = np.empty(Lmax); byB = np.empty(Lmax); bzB = np.empty(Lmax); vB = np.empty(Lmax); tB = np.empty(Lmax); oB = np.empty(Lmax, np.int64)
+        for r in range(sh, nrun, nsh):   # shard: run r is the lower-key side; neighbours are looked up in the full run list, so shards partition the pair set
+            a = K2[r]; b = K2[r + 1]; L = b - a
+            key = rkey[r]
+            j = key // (NV * NT); bv = (key // NT) % NV; bb = key % NT
+            jxr = j // NSUB; jy = j % NSUB
+            dx = (jxr + 0.5) / NSUB * 2 * cr - cr; dy = (jy + 0.5) / NSUB * 2 * cr - cr
+            haveA = False
+            if L >= 2:
+                if L > 256: nrunlong += 1
+                hs = np.int64(L)
+                for ii in range(L):
+                    q = np.int64(W[a + ii]); hs += (q + 1) * np.int64(0x9E3779B97F4A7C15)
+                hh = (hs ^ (hs >> 29)) & rmask
+                skip = False
+                while runset[hh] != 0:
+                    if runset[hh] == hs: skip = True; break
+                    hh = (hh + 1) & rmask
+                if not skip:
+                    fill_l(a, L, W, off, V, dx, dy, bxA, byA, bzA, vA, tA, oA, tp0); haveA = True
+                    for oi in range(L):
+                        ii = oA[oi]; pi = W[a + ii]; ti = tl[pi]; Ti = TT[pi]
+                        for oj in range(oi + 1, L):
+                            jj = oA[oj]
+                            if bxA[jj] - bxA[ii] > tol[1]: break
+                            pj = W[a + jj]; tj = tl[pj]
+                            if tj == ti or abs(Ti - TT[pj]) < dt_min: continue
+                            if abs(byA[ii] - byA[jj]) > tol[2] or abs(bzA[ii] - bzA[jj]) > tol[3]: continue
+                            if abs(vA[ii] - vA[jj]) > tol[0] or abs(tA[ii] - tA[jj]) > tol[4]: continue
+                            emit_l(pi, pj, ti, tj, V, idx, x0, x1, chi_thr, out_i, out_j, out_f, cap, skey, sidx, smask, stouched, st)
+                    if L > 2 and bxA[oA[L - 1]] - bxA[oA[0]] <= tol[1]:
+                        ymin = byA[0]; ymax = byA[0]; zmin = bzA[0]; zmax = bzA[0]
+                        for ii in range(1, L):
+                            if byA[ii] < ymin: ymin = byA[ii]
+                            if byA[ii] > ymax: ymax = byA[ii]
+                            if bzA[ii] < zmin: zmin = bzA[ii]
+                            if bzA[ii] > zmax: zmax = bzA[ii]
+                        if ymax - ymin <= tol[2] and zmax - zmin <= tol[3] and nrt < runtouched.shape[0] and runset[hh] == 0:
+                            runset[hh] = hs; runtouched[nrt] = hh; nrt += 1
+            for nbk in range(4):
+                if nbk == 0:
+                    if bb + 1 >= NT: continue
+                    nkey = key + 1
+                elif nbk == 1:
+                    if bv + 1 >= NV or bb - 1 < 0: continue
+                    nkey = key + NT - 1
+                elif nbk == 2:
+                    if bv + 1 >= NV: continue
+                    nkey = key + NT
+                else:
+                    if bv + 1 >= NV or bb + 1 >= NT: continue
+                    nkey = key + NT + 1
+                lo = r + 1; hi = nrun
+                while lo < hi:
+                    mid = (lo + hi) >> 1
+                    if rkey[mid] < nkey: lo = mid + 1
+                    else: hi = mid
+                if lo >= nrun or rkey[lo] != nkey: continue
+                a2 = K2[lo]; b2 = K2[lo + 1]; L2 = b2 - a2
+                if not haveA:
+                    fill_l(a, L, W, off, V, dx, dy, bxA, byA, bzA, vA, tA, oA, tp0); haveA = True
+                fill_l(a2, L2, W, off, V, dx, dy, bxB, byB, bzB, vB, tB, oB, tp0)
+                start = 0
                 for oi in range(L):
-                    ii = oA[oi]; pi = W[a + ii]; ti = tl[pi]; Ti = TT[pi]
-                    for oj in range(oi + 1, L):
-                        jj = oA[oj]
-                        if bxA[jj] - bxA[ii] > tol[1]: break
-                        pj = W[a + jj]; tj = tl[pj]
+                    ii = oA[oi]; pi = W[a + ii]; ti = tl[pi]; Ti = TT[pi]; xi = bxA[ii]
+                    while start < L2 and bxB[oB[start]] < xi - tol[1]: start += 1
+                    for oj in range(start, L2):
+                        jj = oB[oj]
+                        if bxB[jj] - xi > tol[1]: break
+                        pj = W[a2 + jj]; tj = tl[pj]
                         if tj == ti or abs(Ti - TT[pj]) < dt_min: continue
-                        if abs(byA[ii] - byA[jj]) > tol[2] or abs(bzA[ii] - bzA[jj]) > tol[3]: continue
-                        if abs(vA[ii] - vA[jj]) > tol[0] or abs(tA[ii] - tA[jj]) > tol[4]: continue
+                        if abs(byA[ii] - byB[jj]) > tol[2] or abs(bzA[ii] - bzB[jj]) > tol[3]: continue
+                        if abs(vA[ii] - vB[jj]) > tol[0] or abs(tA[ii] - tB[jj]) > tol[4]: continue
                         emit_l(pi, pj, ti, tj, V, idx, x0, x1, chi_thr, out_i, out_j, out_f, cap, skey, sidx, smask, stouched, st)
-                if L > 2 and bxA[oA[L - 1]] - bxA[oA[0]] <= tol[1]:
-                    ymin = byA[0]; ymax = byA[0]; zmin = bzA[0]; zmax = bzA[0]
-                    for ii in range(1, L):
-                        if byA[ii] < ymin: ymin = byA[ii]
-                        if byA[ii] > ymax: ymax = byA[ii]
-                        if bzA[ii] < zmin: zmin = bzA[ii]
-                        if bzA[ii] > zmax: zmax = bzA[ii]
-                    if ymax - ymin <= tol[2] and zmax - zmin <= tol[3] and nrt < runtouched.shape[0] and runset[hh] == 0:
-                        runset[hh] = hs; runtouched[nrt] = hh; nrt += 1
-        for nbk in range(4):
-            if nbk == 0:
-                if bb + 1 >= NT: continue
-                nkey = key + 1
-            elif nbk == 1:
-                if bv + 1 >= NV or bb - 1 < 0: continue
-                nkey = key + NT - 1
-            elif nbk == 2:
-                if bv + 1 >= NV: continue
-                nkey = key + NT
-            else:
-                if bv + 1 >= NV or bb + 1 >= NT: continue
-                nkey = key + NT + 1
-            lo = r + 1; hi = nrun
-            while lo < hi:
-                mid = (lo + hi) >> 1
-                if rkey[mid] < nkey: lo = mid + 1
-                else: hi = mid
-            if lo >= nrun or rkey[lo] != nkey: continue
-            a2 = K2[lo]; b2 = K2[lo + 1]; L2 = b2 - a2
-            if not haveA:
-                fill_l(a, L, W, off, V, dx, dy, bxA, byA, bzA, vA, tA, oA, tp0); haveA = True
-            fill_l(a2, L2, W, off, V, dx, dy, bxB, byB, bzB, vB, tB, oB, tp0)
-            start = 0
-            for oi in range(L):
-                ii = oA[oi]; pi = W[a + ii]; ti = tl[pi]; Ti = TT[pi]; xi = bxA[ii]
-                while start < L2 and bxB[oB[start]] < xi - tol[1]: start += 1
-                for oj in range(start, L2):
-                    jj = oB[oj]
-                    if bxB[jj] - xi > tol[1]: break
-                    pj = W[a2 + jj]; tj = tl[pj]
-                    if tj == ti or abs(Ti - TT[pj]) < dt_min: continue
-                    if abs(byA[ii] - byB[jj]) > tol[2] or abs(bzA[ii] - bzB[jj]) > tol[3]: continue
-                    if abs(vA[ii] - vB[jj]) > tol[0] or abs(tA[ii] - tB[jj]) > tol[4]: continue
-                    emit_l(pi, pj, ti, tj, V, idx, x0, x1, chi_thr, out_i, out_j, out_f, cap, skey, sidx, smask, stouched, st)
     for i in range(nrt): runset[runtouched[i]] = 0
     for i in range(st[0]): skey[stouched[i]] = -1
     return st[0], st[2], nrunlong, 0, st[5]
@@ -255,7 +253,7 @@ def hash_cells(klist, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, 
             if kp < 0: break
             m += ncnt[kp]
         if m > mmax: mmax = m
-    nbuf = mmax * NSUB * NSUB + 1
+    nbuf = mmax * NSUB + 1   # per sub-cell column (see hash_cell)
     Kb = np.empty((nthr, nbuf), np.int32); Wb = np.empty((nthr, nbuf), np.int32); K2b = np.empty((nthr, nbuf), np.int32); W2b = np.empty((nthr, nbuf), np.int32)
     for th in prange(nthr):
         for a in range(th, nk, nthr):

@@ -57,7 +57,7 @@ def eval_pt(t, u, udot, E, Edot, rho, rhodot, o, P, idx, vlo, vhi, qhi, stats, f
 
 @njit(cache=True, fastmath=True, error_model='numpy')
 def do_quad(S, i0, i1, i2, i3, lr0, rd0, dl, dr, nb_, nras, starts, centers, cbases, cell_rad, vmin_ad, vmax_ad, qmax,
-            tb, res_cell, res_val, n, maxc, stats, mode, t, u, udot, E, Edot, sig_rate, ub, o, o1, fin, fin1, blo, bhi):
+            tb, res_cell, res_val, n, maxc, stats, mode, t, u, udot, E, Edot, sig_rate, ub, o, o1, fin, fin1, blo, bhi, keep):
     """Quad corners S[i0]=(0,0) S[i1]=(1,0) S[i2]=(0,1) S[i3]=(1,1) in (lrho, rhodot). Appends solutions; returns n."""
     stats[1] += 1
     udp = np.empty(3)
@@ -120,6 +120,7 @@ def do_quad(S, i0, i1, i2, i3, lr0, rd0, dl, dr, nb_, nras, starts, centers, cba
             j = jj % nra
             if j < 0: j += nra
             kc = starts[k] + j
+            if keep[kc] == 0: continue   # pass-level cell mask: cells this pass never reads are not refined
             stats[2] += 1
             Cx = centers[kc, 0]; Cy = centers[kc, 1]; Cz = centers[kc, 2]
             if Cx * mx + Cy * my + Cz * mzc < cmin: continue
@@ -225,7 +226,7 @@ def do_quad(S, i0, i1, i2, i3, lr0, rd0, dl, dr, nb_, nras, starts, centers, cba
 
 @njit(cache=True, fastmath=True, error_model='numpy')
 def process_tracklet(t, u, udot, E, Edot, sig_rate, lrhos, rhodots, nb_, nras, starts, centers, cbases, cell_rad,
-                     vmin, vmax, qmax, step_fac, G, V, S, VS, o, tb, res_cell, res_val, maxc, stats, mode, blo, bhi):
+                     vmin, vmax, qmax, step_fac, G, V, S, VS, o, tb, res_cell, res_val, maxc, stats, mode, blo, bhi, keep):
     o1 = np.empty(17); fin = np.empty(4); fin1 = np.empty(4); ub = np.empty(6)
     # two unit directions perpendicular to u (rate-error directions)
     ax = 1.0 if abs(u[0]) < 0.9 else 0.0; ay = 1.0 - ax
@@ -282,7 +283,7 @@ def process_tracklet(t, u, udot, E, Edot, sig_rate, lrhos, rhodots, nb_, nras, s
             if ma == 1 and mb == 1:
                 if mode >= 1 and mode <= 3: continue
                 n = do_quad(G, q00, q10, q01, q11, lrhos[i], rhodots[j], dl, dr, nb_, nras, starts, centers, cbases, cell_rad,
-                            vmin_ad, vmax_ad, qmax, tb, res_cell, res_val, n, maxc, stats, mode, t, u, udot, E, Edot, sig_rate, ub, o, o1, fin, fin1, blo, bhi)
+                            vmin_ad, vmax_ad, qmax, tb, res_cell, res_val, n, maxc, stats, mode, t, u, udot, E, Edot, sig_rate, ub, o, o1, fin, fin1, blo, bhi, keep)
                 if n >= maxc: return n
                 continue
             if mode == 2 or mode == 3: continue
@@ -328,12 +329,12 @@ def process_tracklet(t, u, udot, E, Edot, sig_rate, lrhos, rhodots, nb_, nras, s
                         elif VS[s01] == 0: s01 = spare
                         else: s11 = spare
                     n = do_quad(S, s00, s10, s01, s11, lrhos[i] + a * dl / ma, rhodots[j] + b * dr / mb, dl / ma, dr / mb,
-                                nb_, nras, starts, centers, cbases, cell_rad, vmin_ad, vmax_ad, qmax, tb, res_cell, res_val, n, maxc, stats, mode, t, u, udot, E, Edot, sig_rate, ub, o, o1, fin, fin1, blo, bhi)
+                                nb_, nras, starts, centers, cbases, cell_rad, vmin_ad, vmax_ad, qmax, tb, res_cell, res_val, n, maxc, stats, mode, t, u, udot, E, Edot, sig_rate, ub, o, o1, fin, fin1, blo, bhi, keep)
                     if n >= maxc: return n
     return n
 
 @njit(parallel=True, cache=True, error_model='numpy')
-def process_chunk(T, U, UD, EP, EV, SR, lrhos, rhodots, nb_, nras, starts, centers, cbases, cell_rad, vmin, vmax, qmax, step_fac, maxc, mode, blo=0, bhi=1 << 30):
+def process_chunk(T, U, UD, EP, EV, SR, lrhos, rhodots, nb_, nras, starts, centers, cbases, cell_rad, vmin, vmax, qmax, step_fac, maxc, mode, blo, bhi, keep):
     m = T.shape[0]
     nl = lrhos.shape[0]; nr = rhodots.shape[0]
     counts = np.zeros(m, np.int64)
@@ -346,7 +347,7 @@ def process_chunk(T, U, UD, EP, EV, SR, lrhos, rhodots, nb_, nras, starts, cente
         o = np.empty(17); tb = np.empty(6); rvl = np.empty(maxc * NOUT)
         if True:
             counts[a] = process_tracklet(T[a], U[a], UD[a], EP[a], EV[a], SR[a], lrhos, rhodots, nb_, nras, starts, centers, cbases, cell_rad,
-                                         vmin, vmax, qmax, step_fac, G, V, S, VS, o, tb, rc[a], rvl, maxc, st[a], mode, blo, min(bhi, nb_))
+                                         vmin, vmax, qmax, step_fac, G, V, S, VS, o, tb, rc[a], rvl, maxc, st[a], mode, blo, min(bhi, nb_), keep)
             for q in range(counts[a] * NOUT): rv[a, q] = rvl[q]
     return counts, rc, rv, st
 
