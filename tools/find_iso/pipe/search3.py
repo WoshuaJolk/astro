@@ -23,8 +23,8 @@ def _permute_rows_inplace(val, o):
             val[i] = val[j]; i = j
 
 _nb_cache = {}
-def run_kernel(tr, g, cb, blo=0, bhi=1 << 30, nl=40, nr=56, step=1.5, vmin=8.0, vmax=80.0, qmax=6.0, maxc=6000, chunk=2048, keep_cells=None, seed_all=False):
-    """kernel over all tracklets, keeping only solutions whose radiant cell lies in sky bands [blo, bhi). Sorted by cell."""
+def _kernel_chunks(tr, g, cb, blo=0, bhi=1 << 30, nl=40, nr=56, step=1.5, vmin=8.0, vmax=80.0, qmax=6.0, maxc=6000, chunk=2048, keep_cells=None, seed_all=False):
+    """Yields (cell, tid, val) per tracklet chunk for solutions whose radiant cell is in sky bands [blo, bhi) (and in keep_cells if given)."""
     lr, rd = K4.default_scan(nl=nl, nr=nr)
     n = len(tr['t']); bhi = min(bhi, g['nb'])
     k0 = g['starts'][blo]; k1 = g['starts'][bhi] if bhi < g['nb'] else g['ncell']
@@ -34,7 +34,6 @@ def run_kernel(tr, g, cb, blo=0, bhi=1 << 30, nl=40, nr=56, step=1.5, vmin=8.0, 
         nbi = _nb_cache.get(id(g))
         if nbi is None: nbi = neighbours(g)[0]; _nb_cache[id(g)] = nbi
         keep_u8 = keep_cells.astype(np.uint8).copy(); nn = nbi[keep_cells].ravel(); keep_u8[nn[nn >= 0]] = 1
-    cells = []; tids = []; vals = []
     for s in range(0, n, chunk):
         ii = np.arange(s, min(n, s + chunk))
         c, rc, rv, st = K4.process_chunk(tr['t'][ii], tr['u'][ii], tr['udot'][ii], tr['obs_pos'][ii], tr['obs_vel'][ii], tr['sig_rate'][ii],
@@ -44,7 +43,14 @@ def run_kernel(tr, g, cb, blo=0, bhi=1 << 30, nl=40, nr=56, step=1.5, vmin=8.0, 
             k = c[a]
             cc[p:p + k] = rc[a, :k]; tt[p:p + k] = ii[a]; vv[p:p + k] = rv[a, :k * NOUT].reshape(k, NOUT); p += k
         keep = keep_cells[cc] if keep_cells is not None else (cc >= k0) & (cc < k1)   # keep_cells: bool mask (ncell,) of cells a pass actually reads
-        cells.append(cc[keep]); tids.append(tt[keep]); vals.append(vv[keep])
+        yield cc[keep], tt[keep], vv[keep]
+
+
+def run_kernel(tr, g, cb, blo=0, bhi=1 << 30, keep_cells=None, **kw):
+    """kernel over all tracklets, keeping only solutions whose radiant cell lies in sky bands [blo, bhi). Sorted by cell."""
+    cells = []; tids = []; vals = []
+    for cc, tt, vv in _kernel_chunks(tr, g, cb, blo, bhi, keep_cells=keep_cells, **kw):
+        cells.append(cc); tids.append(tt); vals.append(vv)
     # memory-lean assembly: fill preallocated arrays chunk by chunk (no 2x concat copy), then permute val in place
     tot = sum(len(c) for c in cells)
     cell = np.empty(tot, np.int32); tid = np.empty(tot, np.int32); val = np.empty((tot, NOUT), np.float32); p = 0
@@ -206,15 +212,43 @@ def search(tr, g, cb, npass=4, **kw):
     return P, over, nsol, float(np.mean(narrow_frac))
 
 
-def run_kernel_cached(tr, g, cb, blo, bhi, keep_cells, cache_dir, tag, nsplit=2, bpad=2, **kw):
-    """Same output as run_kernel(tr, g, cb, blo, bhi, keep_cells=keep_cells), but the kernel runs once per sky band and is cached on
-    disk (cell-sorted .npy per band), so consecutive passes that share bands do not recompute it. Band files below blo are deleted
-    (passes advance monotonically). nsplit: a band is computed in cell-range splits to bound the kernel's transient memory."""
+def build_bands(tr, g, cb, bands, cache_dir, tag, bpad=2, **kw):
+    """One kernel sweep over all tracklets for several sky bands at once (seeds from bpad bands beyond the group, output filtered to the
+    group), streamed to raw per-band files so peak memory is ~one band; then each band is cell-sorted and saved as .npy."""
+    import os
+    bands = sorted(int(b) for b in bands); nb = g['nb']
+    km = np.zeros(g['ncell'], bool)
+    for b in bands: km[g['starts'][b]:(g['starts'][b + 1] if b + 1 < nb else g['ncell'])] = True
+    band_of = np.searchsorted(g['starts'], np.arange(g['ncell']), 'right') - 1
+    fh = {b: [open(f'{cache_dir}/{tag}_b{b:03d}_{s}.raw', 'wb') for s in ('cell', 'tid', 'val')] for b in bands}
+    # a wider sweep finds more solutions per tracklet than a per-pass sweep, so the per-tracklet cap (maxc, default 6000) must grow with it
+    # or the highest bands of the sweep get truncated; chunk shrinks to keep the kernel's scratch (chunk x maxc x NOUT floats) constant
+    nsweep = min(bands[-1] + bpad + 1, nb) - max(bands[0] - bpad, 0)
+    kw.setdefault('maxc', 6000 * max(1, int(np.ceil(nsweep / 4.0)))); kw.setdefault('chunk', max(256, 2048 * 6000 // kw['maxc']))
+    for cc, tt, vv in _kernel_chunks(tr, g, cb, max(bands[0] - bpad, 0), min(bands[-1] + bpad + 1, nb), keep_cells=km, seed_all=True, **kw):
+        bb = band_of[cc]
+        for b in bands:
+            m = bb == b
+            if m.any(): fh[b][0].write(cc[m].tobytes()); fh[b][1].write(tt[m].tobytes()); fh[b][2].write(vv[m].tobytes())
+    for b in bands:
+        for f in fh[b]: f.close()
+        base = f'{cache_dir}/{tag}_b{b:03d}'
+        c = np.fromfile(base + '_cell.raw', np.int32); t_ = np.fromfile(base + '_tid.raw', np.int32); v = np.fromfile(base + '_val.raw', np.float32).reshape(-1, NOUT)
+        o = np.argsort(c, kind='stable'); c = c[o]; t_ = t_[o]; _permute_rows_inplace(v, o.astype(np.int64)); del o
+        np.save(base + '_cell.npy', c); np.save(base + '_tid.npy', t_); np.save(base + '_val.tmp.npy', v); os.replace(base + '_val.tmp.npy', base + '_val.npy')
+        del c, t_, v
+        for s in ('cell', 'tid', 'val'): os.remove(f'{base}_{s}.raw')
+
+
+def run_kernel_cached(tr, g, cb, blo, bhi, keep_cells, cache_dir, tag, nbands=4, bpad=2, **kw):
+    """Same solutions as run_kernel(..., keep_cells=keep_cells) for every kept cell (plus the ones the per-pass path only fills partially),
+    but the kernel runs once per group of nbands sky bands and is cached on disk (cell-sorted .npy per band), so consecutive passes that
+    share bands do not recompute it. Band files below the lowest kept band are deleted (passes advance monotonically)."""
     import os
     os.makedirs(cache_dir, exist_ok=True)
     nb = g['nb']
     kk_all = np.flatnonzero(keep_cells); bands = np.unique(np.searchsorted(g['starts'], kk_all, 'right') - 1)   # every band holding a kept cell
-    blo = int(bands.min()); bhi = int(bands.max()) + 1   # blo/bhi args are advisory; the cache serves all kept cells fully
+    blo = int(bands.min())
     for fn in os.listdir(cache_dir):
         if fn.startswith(f'{tag}_b') and fn.endswith('_cell.npy'):
             b = int(fn[len(tag) + 2:-9])
@@ -222,18 +256,16 @@ def run_kernel_cached(tr, g, cb, blo, bhi, keep_cells, cache_dir, tag, nsplit=2,
                 for suf in ('cell', 'tid', 'val'):
                     try: os.remove(f'{cache_dir}/{tag}_b{b:03d}_{suf}.npy')
                     except FileNotFoundError: pass
+    missing = [int(b) for b in bands if not os.path.exists(f'{cache_dir}/{tag}_b{int(b):03d}_val.npy')]
+    if missing:   # build the missing bands (and, when a group has room, the following bands too, since the next passes will need them)
+        b0 = missing[0]; grp = list(range(b0, min(b0 + nbands, nb)))
+        grp = [b for b in grp if not os.path.exists(f'{cache_dir}/{tag}_b{b:03d}_val.npy')]
+        build_bands(tr, g, cb, grp, cache_dir, tag, bpad=bpad, **kw)
+        for b in missing:
+            if not os.path.exists(f'{cache_dir}/{tag}_b{b:03d}_val.npy'): build_bands(tr, g, cb, [b], cache_dir, tag, bpad=bpad, **kw)
     cells = []; tids = []; vals = []
     for b in bands:
         b = int(b); base = f'{cache_dir}/{tag}_b{b:03d}'
-        if not os.path.exists(base + '_val.npy'):
-            k0 = g['starts'][b]; k1 = g['starts'][b + 1] if b + 1 < nb else g['ncell']
-            edges = np.linspace(k0, k1, nsplit + 1).astype(int); parts = []
-            for s in range(nsplit):
-                km = np.zeros(g['ncell'], bool); km[edges[s]:edges[s + 1]] = True
-                parts.append(run_kernel(tr, g, cb, max(b - bpad, 0), min(b + bpad + 1, nb), keep_cells=km, seed_all=True, **kw))   # a solution seeded up to bpad bands away can refine into this band
-            c = np.concatenate([p[0] for p in parts]); t_ = np.concatenate([p[1] for p in parts]); v = np.concatenate([p[2] for p in parts]); del parts
-            np.save(base + '_cell.npy', c); np.save(base + '_tid.npy', t_); np.save(base + '_val.tmp.npy', v); os.replace(base + '_val.tmp.npy', base + '_val.npy')
-            del c, t_, v
         c = np.load(base + '_cell.npy', mmap_mode='r'); t_ = np.load(base + '_tid.npy', mmap_mode='r'); v = np.load(base + '_val.npy', mmap_mode='r')
         k0 = g['starts'][b]; k1 = g['starts'][b + 1] if b + 1 < nb else g['ncell']
         kk = np.flatnonzero(keep_cells[k0:k1]) + k0
