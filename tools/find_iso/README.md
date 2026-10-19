@@ -101,3 +101,10 @@ the joint orbit fit, χ²/dof > 100). Full ITF (2.56M tracklets, 9.1M observatio
 priors) and how that was verified, (e) 1I/2I/3I recovery fractions and the number of false objects after the final
 fit stage, (f) peak RSS. Our numbers for (c): kernel 143 s, pairs ~120 s, triangles 6 s, Stage-3 + find_orb ~15 min,
 total ≈ 20 min for the 1I window end-to-end on 8 cores.
+
+## Known issue fixed 2026-10-19 (affects runs before this date)
+`search4.NV` was 40: the pair hasher binned v∞ in 1 km/s bins and gave solutions with v∞ ≥ 40 km/s no hash key, so
+they could never form a pair. All runs before this fix were complete only for v∞ < 40 km/s (1I/2I unaffected; a
+3I-class object at 58 km/s was recovered only through the Stage-3 grow step). Fixed by NV=80 (+ radix width 12 bits);
+verified on injected 3I: pairs at v∞ 50–66 km/s 669 → 8,353. After changing hash constants delete the numba cache
+(`__pycache__/search{4,5,6b}.*.nb[ic]`) — constants are baked into the cached machine code of importing modules.
