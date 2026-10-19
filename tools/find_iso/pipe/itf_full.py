@@ -6,7 +6,7 @@ import search6b as S6, time, sys, os
 from search import load_tracklets
 import kernel4 as K4, search6b as S3, search3 as SK
 PASS_TRK = int(os.environ.get('ISO_PASS_TRK', '16000'))
-KCACHE = os.environ.get('ISO_KCACHE', '1') == '1'; KBANDS = int(os.environ.get('ISO_KBANDS', '4'))   # per-band kernel cache (search3.run_kernel_cached)   # tracklets per pass unit; sols/pass ~ N/PASS_TRK
+KCACHE = os.environ.get('ISO_KCACHE', '1') == '1'; KBANDS = int(os.environ.get('ISO_KBANDS', '2'))   # per-band kernel cache (search3.run_kernel_cached)   # tracklets per pass unit; sols/pass ~ N/PASS_TRK
 
 def dedupe_lean(P, per_cell=False):
     """Same result as search3.dedupe (keep lowest-chi row per unordered tracklet pair) without the float64 copy.
@@ -59,6 +59,9 @@ for wi, ws in enumerate(starts):
         kfrom, kto = int(cedges[p]), int(cedges[p + 1]); t0 = time.time()
         B0 = int(np.searchsorted(g['starts'], kfrom, 'right') - 1); B1 = int(np.searchsorted(g['starts'], kto - 1, 'right'))
         pf = f'{OUT}/pairs_w{wi:02d}_p{p:02d}.npy'
+        if STREAM and not os.path.exists(pf) and os.path.exists(f'{OUT}/clusters_w{wi:02d}_p{p:02d}.pkl'):   # pairs checkpoint deleted to free disk: the pkl is the deliverable
+            with open(f'{OUT}/clusters_w{wi:02d}_p{p:02d}.pkl', 'rb') as fh: ncl += len(pickle.load(fh))
+            print(f'  w{wi:02d} pass {p}/{npass}: clusters checkpoint present (pairs file removed), skipped', flush=True); continue
         if os.path.exists(pf):  # per-pass checkpoint: a restart re-uses finished passes
             P = np.load(pf); nraw += len(P)
             if STREAM:
@@ -80,6 +83,7 @@ for wi, ws in enumerate(starts):
             cf = f'{OUT}/clusters_w{wi:02d}_p{p:02d}.pkl'
             if os.path.exists(cf): os.remove(cf)   # a finished-pass marker must be newer than its pairs file
             ncl += cluster_pass(P, cf)
+            if os.environ.get('ISO_KEEP_PAIRS', '0') != '1': os.remove(pf)   # the pkl is the deliverable and marks the pass done; the pairs file only costs disk
         else: allP.append(P)
         print(f'  w{wi:02d} pass {p}/{npass}: {len(cell)} sols, pairs {len(P)}, overflow {ov}, {time.time()-t0:.0f}s', flush=True)
         del cell, tid, val, P

@@ -240,15 +240,16 @@ def build_bands(tr, g, cb, bands, cache_dir, tag, bpad=2, **kw):
         for s in ('cell', 'tid', 'val'): os.remove(f'{base}_{s}.raw')
 
 
-def run_kernel_cached(tr, g, cb, blo, bhi, keep_cells, cache_dir, tag, nbands=4, bpad=2, **kw):
+def run_kernel_cached(tr, g, cb, blo, bhi, keep_cells, cache_dir, tag, nbands=2, bpad=2, **kw):
     """Same solutions as run_kernel(..., keep_cells=keep_cells) for every kept cell (plus the ones the per-pass path only fills partially),
     but the kernel runs once per group of nbands sky bands and is cached on disk (cell-sorted .npy per band), so consecutive passes that
     share bands do not recompute it. Band files below the lowest kept band are deleted (passes advance monotonically)."""
     import os
     os.makedirs(cache_dir, exist_ok=True)
     nb = g['nb']
+    blo_arg, bhi_arg = int(blo), int(min(bhi, nb))
     kk_all = np.flatnonzero(keep_cells); bands = np.unique(np.searchsorted(g['starts'], kk_all, 'right') - 1)   # every band holding a kept cell
-    blo = int(bands.min())
+    bands = bands[(bands >= blo_arg - 1) & (bands < bhi_arg + 1)]; blo = int(bands.min())   # per-pass span +1 band each side: covers every cell the per-pass kernel populated
     for fn in os.listdir(cache_dir):
         if fn.startswith(f'{tag}_b') and fn.endswith('_cell.npy'):
             b = int(fn[len(tag) + 2:-9])
@@ -265,7 +266,8 @@ def run_kernel_cached(tr, g, cb, blo, bhi, keep_cells, cache_dir, tag, nbands=4,
             if not os.path.exists(f'{cache_dir}/{tag}_b{b:03d}_val.npy'): build_bands(tr, g, cb, [b], cache_dir, tag, bpad=bpad, **kw)
     cells = []; tids = []; vals = []
     for b in bands:
-        b = int(b); base = f'{cache_dir}/{tag}_b{b:03d}'
+        b = int(b)
+        base = f'{cache_dir}/{tag}_b{b:03d}'
         c = np.load(base + '_cell.npy', mmap_mode='r'); t_ = np.load(base + '_tid.npy', mmap_mode='r'); v = np.load(base + '_val.npy', mmap_mode='r')
         k0 = g['starts'][b]; k1 = g['starts'][b + 1] if b + 1 < nb else g['ncell']
         kk = np.flatnonzero(keep_cells[k0:k1]) + k0
