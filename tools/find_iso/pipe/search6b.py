@@ -290,8 +290,10 @@ def find_pairs(cell, tid, val, T, g, nb_ids, nb_off, kfrom=0, kto=None, tp0=0.0,
             if a in redo: n, ci, cj, cf, ov_ = redo[a]
             else: n, ci, cj, cf, ov_ = cnt[a], oi[a], oj[a], of[a], over[a]
             tot_over += ov_
-            if n: P.append(np.column_stack([tid[ci[:n]], tid[cj[:n]], np.full(n, k0 + a), cf[:n, 0], cf[:n, 3], cf[:n, 1], cf[:n, 2]]))
-    P = np.concatenate(P) if P else np.zeros((0, 7))
+            if n:   # float32 rows (tracklet ids < 2^24 are exact); halves the pair-stage memory vs float64
+                blk = np.empty((n, 7), np.float32); blk[:, 0] = tid[ci[:n]]; blk[:, 1] = tid[cj[:n]]; blk[:, 2] = k0 + a
+                blk[:, 3] = cf[:n, 0]; blk[:, 4] = cf[:n, 3]; blk[:, 5] = cf[:n, 1]; blk[:, 6] = cf[:n, 2]; P.append(blk)
+    P = np.concatenate(P) if P else np.zeros((0, 7), np.float32)
     if nretry: print(f'    retried {nretry} overflowed cells with cap {retry_cap} ({nshard} sharded {retry_shards}-way); residual overflow {tot_over}', flush=True)
     return P, tot_over, tot_rover
 
