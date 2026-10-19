@@ -80,7 +80,7 @@ def fill_l(a, L, who, off, V, dx, dy, bx, by, bz, vv, tt_, order, tp0):
         for ii in range(L): order[ii] = o[ii]
 
 @njit(cache=True, fastmath=True, error_model='numpy')
-def hash_cell(k, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, chi_thr, tp_tol, dt_min, out_i, out_j, out_f, cap, rcnt, runset, runtouched, skey, sidx, stouched, Kb, Wb, K2b, W2b):
+def hash_cell(k, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, chi_thr, tp_tol, dt_min, out_i, out_j, out_f, cap, rcnt, runset, runtouched, skey, sidx, stouched, Kb, Wb, K2b, W2b, sh, nsh):
     m = cell_start[k + 1] - cell_start[k]
     for a in range(nb_ids.shape[1]):
         kp = nb_ids[k, a]
@@ -152,7 +152,7 @@ def hash_cell(k, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, 
     bxA = np.empty(Lmax); byA = np.empty(Lmax); bzA = np.empty(Lmax); vA = np.empty(Lmax); tA = np.empty(Lmax); oA = np.empty(Lmax, np.int64)
     bxB = np.empty(Lmax); byB = np.empty(Lmax); bzB = np.empty(Lmax); vB = np.empty(Lmax); tB = np.empty(Lmax); oB = np.empty(Lmax, np.int64)
     nrunlong = 0
-    for r in range(nrun):
+    for r in range(sh, nrun, nsh):   # shard: run r is the lower-key side; neighbours are looked up in the full run list, so shards partition the pair set
         a = K2[r]; b = K2[r + 1]; L = b - a
         key = rkey[r]
         j = key // (NV * NT); bv = (key // NT) % NV; bb = key % NT
@@ -230,7 +230,7 @@ def hash_cell(k, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, 
     return st[0], st[2], nrunlong, 0, st[5]
 
 @njit(parallel=True, cache=True, error_model='numpy')
-def hash_cells(klist, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, chi_thr, tp_tol, dt_min, cap, maxrun):
+def hash_cells(klist, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, chi_thr, tp_tol, dt_min, cap, maxrun, shard, nshard):
     nk = klist.shape[0]
     out_i = np.empty((nk, cap), np.int64); out_j = np.empty((nk, cap), np.int64); out_f = np.empty((nk, cap, 4), np.float32)
     cnt = np.zeros(nk, np.int64); over = np.zeros(nk, np.int64); rover = np.zeros(nk, np.int64)
@@ -259,34 +259,42 @@ def hash_cells(klist, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, 
     Kb = np.empty((nthr, nbuf), np.int32); Wb = np.empty((nthr, nbuf), np.int32); K2b = np.empty((nthr, nbuf), np.int32); W2b = np.empty((nthr, nbuf), np.int32)
     for th in prange(nthr):
         for a in range(th, nk, nthr):
-            n, nov, nro, _, _ = hash_cell(klist[a], cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, chi_thr, tp_tol, dt_min, out_i[a], out_j[a], out_f[a], cap, rcnt[th], runset[th], runtouched[th], skey[th], sidx[th], stouched[th], Kb[th], Wb[th], K2b[th], W2b[th])
+            n, nov, nro, _, _ = hash_cell(klist[a], cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, chi_thr, tp_tol, dt_min, out_i[a], out_j[a], out_f[a], cap, rcnt[th], runset[th], runtouched[th], skey[th], sidx[th], stouched[th], Kb[th], Wb[th], K2b[th], W2b[th], shard[a], nshard)
             cnt[a] = n; over[a] = nov; rover[a] = nro
     return cnt, over, rover, out_i, out_j, out_f
 
-def find_pairs(cell, tid, val, T, g, nb_ids, nb_off, kfrom=0, kto=None, tp0=0.0, chi_thr=20.0, tp_tol=10.0, dt_min=1.0, cap=200000, maxrun=256, kchunk=256, retry_cap=4000000, retry_batch=8):
-    nretry = 0
+def find_pairs(cell, tid, val, T, g, nb_ids, nb_off, kfrom=0, kto=None, tp0=0.0, chi_thr=20.0, tp_tol=10.0, dt_min=1.0, cap=200000, maxrun=256, kchunk=256, retry_cap=4000000, retry_batch=8, retry_shards=8, shard_min=300000):
+    nretry = 0; nshard = 0
     cell_start = np.searchsorted(cell, np.arange(g['ncell'] + 1)).astype(np.int64)
     narrow = narrow_flags(val)
     if kto is None: kto = g['ncell']
     P = []; tot_over = 0; tot_rover = 0
     for k0 in range(kfrom, kto, kchunk):
         k1 = min(kto, k0 + kchunk)
-        cnt, over, rover, oi, oj, of = hash_cells(np.arange(k0, k1, dtype=np.int64), cell_start, tid, val, T, narrow, nb_ids, nb_off, g['cell_rad'], TOL, tp0, chi_thr, tp_tol, dt_min, cap, maxrun)
+        cnt, over, rover, oi, oj, of = hash_cells(np.arange(k0, k1, dtype=np.int64), cell_start, tid, val, T, narrow, nb_ids, nb_off, g['cell_rad'], TOL, tp0, chi_thr, tp_tol, dt_min, cap, maxrun, np.zeros(k1 - k0, np.int64), 1)
         tot_rover += rover.sum()
         bad = np.flatnonzero(over > 0) if retry_cap > cap else np.zeros(0, np.int64)
         redo = {}
-        for b0 in range(0, len(bad), retry_batch):  # lossless retry of overflowed cells, 8 at a time in parallel, with a much larger buffer
-            bb = bad[b0:b0 + retry_batch]
-            cnt2, over2, rover2, oi2, oj2, of2 = hash_cells((k0 + bb).astype(np.int64), cell_start, tid, val, T, narrow, nb_ids, nb_off, g['cell_rad'], TOL, tp0, chi_thr, tp_tol, dt_min, retry_cap, maxrun)
+        est = cap + over[bad] if len(bad) else np.zeros(0, np.int64)   # first-stage emits beyond cap ~ cell size
+        small = bad[est < shard_min]; big = bad[est >= shard_min]
+        for b0 in range(0, len(small), retry_batch):  # lossless retry of overflowed cells, 8 at a time in parallel, with a much larger buffer
+            bb = small[b0:b0 + retry_batch]
+            cnt2, over2, rover2, oi2, oj2, of2 = hash_cells((k0 + bb).astype(np.int64), cell_start, tid, val, T, narrow, nb_ids, nb_off, g['cell_rad'], TOL, tp0, chi_thr, tp_tol, dt_min, retry_cap, maxrun, np.zeros(len(bb), np.int64), 1)
             for q, a in enumerate(bb): redo[a] = (cnt2[q], oi2[q], oj2[q], of2[q], over2[q])
             nretry += len(bb)
+        for a in big:  # a giant cell is split into retry_shards run-shards so it uses all threads instead of one (same pair set; shards partition the run list)
+            kl = np.full(retry_shards, k0 + a, np.int64); shl = np.arange(retry_shards, dtype=np.int64)
+            cnt2, over2, rover2, oi2, oj2, of2 = hash_cells(kl, cell_start, tid, val, T, narrow, nb_ids, nb_off, g['cell_rad'], TOL, tp0, chi_thr, tp_tol, dt_min, retry_cap, maxrun, shl, retry_shards)
+            redo[a] = (int(cnt2.sum()), np.concatenate([oi2[r, :cnt2[r]] for r in range(retry_shards)]), np.concatenate([oj2[r, :cnt2[r]] for r in range(retry_shards)]),
+                       np.concatenate([of2[r, :cnt2[r]] for r in range(retry_shards)]), int(over2.sum()))
+            nretry += 1; nshard += 1
         for a in range(k1 - k0):
             if a in redo: n, ci, cj, cf, ov_ = redo[a]
             else: n, ci, cj, cf, ov_ = cnt[a], oi[a], oj[a], of[a], over[a]
             tot_over += ov_
             if n: P.append(np.column_stack([tid[ci[:n]], tid[cj[:n]], np.full(n, k0 + a), cf[:n, 0], cf[:n, 3], cf[:n, 1], cf[:n, 2]]))
     P = np.concatenate(P) if P else np.zeros((0, 7))
-    if nretry: print(f'    retried {nretry} overflowed cells with cap {retry_cap}; residual overflow {tot_over}', flush=True)
+    if nretry: print(f'    retried {nretry} overflowed cells with cap {retry_cap} ({nshard} sharded {retry_shards}-way); residual overflow {tot_over}', flush=True)
     return P, tot_over, tot_rover
 
 def search(tr, g, cb, npass=4, **kw):
