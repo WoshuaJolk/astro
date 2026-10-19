@@ -115,13 +115,14 @@ def hash_cell(k, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, tp0, 
         K = np.empty(m * NSUB * NSUB, np.int32); W = np.empty(m * NSUB * NSUB, np.int32)
     st = np.zeros(6, np.int64)   # n, -, nover, -, -, nemitcalls
     nrt = 0; nrunlong = 0; x0 = -ext; x1 = ext
-    for jx in range(NSUB):   # one sub-cell column at a time: keys with different jx never share a run or a neighbour key, so this is exact and cuts the K/W buffers NSUB-fold
+    for jg in range(NSUB * NSUB):   # one sub-cell at a time: keys with different (jx,jy) never share a run or a neighbour key, so this is exact and cuts the K/W buffers NSUB^2-fold
+        jx = jg // NSUB; jy = jg % NSUB
         tot = 0
         for p in range(m):
             dx = (jx + 0.5) / NSUB * 2 * cr - cr
             ddx = dx + off[p, 0]
             if abs(ddx) > ext: continue
-            for jy in range(NSUB):
+            if True:
                 dy = (jy + 0.5) / NSUB * 2 * cr - cr
                 ddy = dy + off[p, 1]
                 if abs(ddy) > ext: continue
@@ -253,7 +254,7 @@ def hash_cells(klist, cell_start, tid, val, T, narrow, nb_ids, nb_off, cr, tol, 
             if kp < 0: break
             m += ncnt[kp]
         if m > mmax: mmax = m
-    nbuf = mmax * NSUB + 1   # per sub-cell column (see hash_cell)
+    nbuf = mmax + 1   # per sub-cell (see hash_cell)
     Kb = np.empty((nthr, nbuf), np.int32); Wb = np.empty((nthr, nbuf), np.int32); K2b = np.empty((nthr, nbuf), np.int32); W2b = np.empty((nthr, nbuf), np.int32)
     for th in prange(nthr):
         for a in range(th, nk, nthr):
